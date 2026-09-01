@@ -1,104 +1,72 @@
 """
-Word document merging functionality.
+Incremental Word document merging functionality.
+Appends Word documents to a master document and refreshes TOC.
 """
 
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 from docx import Document
-from docx.shared import Pt, Inches
-from docx.enum.style import WD_STYLE_TYPE
 from .toc_manager import TOCManager
-from .utils import validate_file_path, is_docx, create_output_directory, extract_headings_from_docx
+from .utils import validate_file_path, is_docx, extract_headings_from_docx
 from .config import Config
 
 
 class WordMerger:
-    """Merge multiple Word documents into a single document with auto-refreshing TOC."""
+    """Incrementally append Word documents to a master document and refresh TOC."""
     
-    def __init__(self, config: Optional[Config] = None):
-        """Initialize Word document merger.
+    def __init__(self, master_docx_path: str, config: Optional[Config] = None):
+        """Initialize Word merger with a master document.
         
         Args:
+            master_docx_path: Path to master DOCX file to append to
             config: Configuration object (optional)
         """
+        validate_file_path(master_docx_path, '.docx')
+        
         self.config = config or Config()
-        self.doc_files: List[str] = []
-        self.master_doc: Optional[Document] = None
+        self.master_docx_path = master_docx_path
+        self.master_doc = Document(master_docx_path)
         self.toc_manager = TOCManager()
-        self.page_breaks_between_docs = True
+        self.original_paragraph_count = len(self.master_doc.paragraphs)
         self.preserve_styles = self.config.get('word.keep_styles', True)
+        
+        # Extract initial TOC
+        self._extract_toc()
 
-    def add_document(self, file_path: str, add_page_break: bool = True) -> 'WordMerger':
-        """Add a Word document to merge queue.
+    def _extract_toc(self) -> None:
+        """Extract TOC from master document."""
+        self.toc_manager.clear()
+        for para in self.master_doc.paragraphs:
+            style_name = para.style.name if para.style else ''
+            if style_name.startswith('Heading'):
+                try:
+                    level = int(style_name.split()[-1])
+                    self.toc_manager.add_entry(para.text, 0, level)
+                except (ValueError, IndexError):
+                    pass
+
+    def append_document(self, file_path: str, add_page_break: bool = True) -> 'WordMerger':
+        """Append a Word document to master document.
         
         Args:
-            file_path: Path to DOCX file
-            add_page_break: Whether to add page break before this document
+            file_path: Path to DOCX file to append
+            add_page_break: Whether to add page break before appending
             
         Returns:
             Self for method chaining
         """
         validate_file_path(file_path, '.docx')
-        self.doc_files.append((file_path, add_page_break))
-        return self
-
-    def add_documents_batch(self, file_paths: List[str], 
-                           add_page_breaks: bool = True) -> 'WordMerger':
-        """Add multiple Word documents at once.
         
-        Args:
-            file_paths: List of DOCX file paths
-            add_page_breaks: Whether to add page breaks between documents
-            
-        Returns:
-            Self for method chaining
-        """
-        for file_path in file_paths:
-            self.add_document(file_path, add_page_breaks)
-        return self
-
-    def merge(self, master_file: Optional[str] = None) -> Document:
-        """Merge all documents into master document.
+        source_doc = Document(file_path)
         
-        Args:
-            master_file: Optional path to master document to start with
-            
-        Returns:
-            Merged Document object
-        """
-        if master_file:
-            validate_file_path(master_file, '.docx')
-            self.master_doc = Document(master_file)
-        else:
-            # Create new document
-            self.master_doc = Document()
-        
-        # Merge each document
-        for file_path, add_break in self.doc_files:
-            self._merge_document(file_path, add_break)
-        
-        return self.master_doc
-
-    def _merge_document(self, file_path: str, add_page_break: bool) -> None:
-        """Merge a single document into master.
-        
-        Args:
-            file_path: Path to document to merge
-            add_page_break: Whether to add page break before this document
-        """
-        doc = Document(file_path)
-        
-        # Add page break if requested
+        # Add page break if requested and master has content
         if add_page_break and self.master_doc.paragraphs:
             self.master_doc.add_page_break()
         
-        # Copy paragraphs
-        for para in doc.paragraphs:
-            # Add new paragraph to master
+        # Append paragraphs
+        for para in source_doc.paragraphs:
             new_para = self.master_doc.add_paragraph()
-            
-            # Copy formatting
             new_para.style = para.style
             new_para.alignment = para.alignment
             
@@ -107,14 +75,11 @@ class WordMerger:
                 new_run = new_para.add_run(run.text)
                 self._copy_run_formatting(run, new_run)
         
-        # Copy tables
-        for table in doc.tables:
+        # Append tables
+        for table in source_doc.tables:
             self._copy_table(table)
         
-        # Extract headings for TOC
-        headings = extract_headings_from_docx(file_path)
-        for heading_text, level in headings:
-            self.toc_manager.add_entry(heading_text, 0, level)  # Page num will be updated
+        return self
 
     def _copy_run_formatting(self, source_run, target_run) -> None:
         """Copy formatting from source run to target run.
@@ -124,7 +89,6 @@ class WordMerger:
             target_run: Target run object
         """
         try:
-            # Copy font properties
             if source_run.font.bold is not None:
                 target_run.font.bold = source_run.font.bold
             if source_run.font.italic is not None:
@@ -138,7 +102,7 @@ class WordMerger:
             if source_run.font.name is not None:
                 target_run.font.name = source_run.font.name
         except Exception as e:
-            print(f"Warning: Could not copy run formatting: {e}")
+            print(f"Warning: Could not copy formatting: {e}")
 
     def _copy_table(self, table) -> None:
         """Copy a table to master document.
@@ -147,18 +111,13 @@ class WordMerger:
             table: Table object to copy
         """
         try:
-            # Create new table with same dimensions
-            new_table = self.master_doc.add_table(rows=len(table.rows), 
+            new_table = self.master_doc.add_table(rows=len(table.rows),
                                                    cols=len(table.columns))
             new_table.style = table.style
             
-            # Copy cells
             for i, row in enumerate(table.rows):
                 for j, cell in enumerate(row.cells):
-                    # Copy text
                     new_table.rows[i].cells[j].text = cell.text
-                    
-                    # Copy cell formatting if possible
                     try:
                         new_table.rows[i].cells[j].width = cell.width
                     except:
@@ -166,116 +125,65 @@ class WordMerger:
         except Exception as e:
             print(f"Warning: Could not copy table: {e}")
 
-    def generate_toc(self, max_depth: int = 3, insert_at_beginning: bool = True) -> str:
-        """Generate and insert table of contents.
+    def refresh_toc(self, max_depth: int = 3, insert_at_beginning: bool = False) -> str:
+        """Refresh table of contents.
         
         Args:
             max_depth: Maximum heading depth to include
-            insert_at_beginning: Whether to insert TOC at beginning of document
+            insert_at_beginning: Whether to insert fresh TOC at beginning
             
         Returns:
             Formatted TOC string
         """
-        if not self.master_doc:
-            self.merge()
+        # Extract fresh TOC from current document
+        self._extract_toc()
         
-        # Extract headings from merged document
-        self._extract_headings_from_master()
-        
-        # Filter by max depth
+        # Filter by max depth if needed
         if max_depth < self.toc_manager.get_max_level():
-            filtered_toc = self.toc_manager.filter_by_level(max_depth)
-            entries = filtered_toc.get_entries()
-        else:
-            entries = self.toc_manager.get_entries()
-        
-        if insert_at_beginning:
-            self._insert_toc_page(entries)
+            self.toc_manager = self.toc_manager.filter_by_level(max_depth)
         
         return self.toc_manager.format_toc()
 
-    def _extract_headings_from_master(self) -> None:
-        """Extract headings from master document paragraphs."""
-        self.toc_manager.clear()
-        page_num = 1
+    def get_paragraph_count(self) -> int:
+        """Get total paragraph count of master document.
         
-        for para in self.master_doc.paragraphs:
-            style_name = para.style.name if para.style else ''
-            
-            # Check if this is a heading style
-            if style_name.startswith('Heading'):
-                try:
-                    level = int(style_name.split()[-1])
-                    self.toc_manager.add_entry(para.text, page_num, level)
-                except (ValueError, IndexError):
-                    pass
-
-    def _insert_toc_page(self, entries: List) -> None:
-        """Insert TOC page at beginning of document.
-        
-        Args:
-            entries: List of TOC entries
-        """
-        # Create TOC in Word by inserting at beginning
-        # Get current first paragraph
-        first_para = self.master_doc.paragraphs[0]._element
-        parent = first_para.getparent()
-        
-        # Create new TOC paragraph
-        try:
-            from docx.oxml import OxmlElement
-            
-            # Insert title
-            toc_title = self.master_doc.add_paragraph('Table of Contents', style='Heading 1')
-            
-            # Insert entries
-            for entry in entries:
-                indent_level = '  ' * (entry.level - 1)
-                self.master_doc.add_paragraph(
-                    f"{indent_level}{entry.title}",
-                    style=f'List {entry.level}' if entry.level <= 3 else 'Normal'
-                )
-            
-            # Add page break after TOC
-            self.master_doc.add_page_break()
-        except Exception as e:
-            print(f"Warning: Could not insert TOC page: {e}")
-
-    def refresh_toc(self, max_depth: int = 3) -> str:
-        """Refresh/update the table of contents.
-        
-        Args:
-            max_depth: Maximum heading depth
-            
         Returns:
-            Updated TOC string
+            Total number of paragraphs
         """
-        return self.generate_toc(max_depth, insert_at_beginning=False)
+        return len(self.master_doc.paragraphs)
 
-    def update_toc_fields(self) -> None:
-        """Update TOC fields in document."""
-        if not self.master_doc:
-            return
+    def get_appended_paragraph_count(self) -> int:
+        """Get number of paragraphs appended.
         
-        # Word uses special field codes for TOC
-        # This would need to be done through Word COM interface
-        print("Note: Open the document in Word and press Ctrl+A then F9 to update TOC fields")
-
-    def save(self, output_path: str) -> None:
-        """Save merged document to file.
-        
-        Args:
-            output_path: Path to output DOCX file
+        Returns:
+            Number of appended paragraphs
         """
-        if not self.master_doc:
-            self.merge()
+        return self.get_paragraph_count() - self.original_paragraph_count
+
+    def save(self) -> None:
+        """Save updated master Word document (overwrites original file)."""
+        # Create backup of original
+        backup_path = str(self.master_docx_path).rsplit('.', 1)[0] + '_backup.docx'
+        if Path(self.master_docx_path).exists() and not Path(backup_path).exists():
+            import shutil
+            shutil.copy(self.master_docx_path, backup_path)
         
-        create_output_directory(output_path)
-        self.master_doc.save(output_path)
+        # Save to master file (overwrites)
+        self.master_doc.save(self.master_docx_path)
         
-        print(f"✓ Merged Word document saved to: {output_path}")
-        print(f"  Total paragraphs: {len(self.master_doc.paragraphs)}")
-        print(f"  Total documents merged: {len(self.doc_files)}")
+        print(f"✓ Master Word document updated: {self.master_docx_path}")
+        print(f"  Total paragraphs: {self.get_paragraph_count()}")
+        print(f"  Paragraphs appended: {self.get_appended_paragraph_count()}")
+        if Path(backup_path).exists():
+            print(f"  Backup saved: {backup_path}")
+
+    def get_toc_manager(self) -> TOCManager:
+        """Get TOC manager for direct access.
+        
+        Returns:
+            TOCManager instance
+        """
+        return self.toc_manager
 
     def get_document(self) -> Document:
         """Get the master document object.
@@ -283,16 +191,8 @@ class WordMerger:
         Returns:
             Master Document object
         """
-        if not self.master_doc:
-            self.merge()
         return self.master_doc
-
-    def clear(self) -> None:
-        """Clear all data and reset merger."""
-        self.doc_files.clear()
-        self.master_doc = None
-        self.toc_manager.clear()
 
     def __repr__(self) -> str:
         """String representation."""
-        return f"WordMerger({len(self.doc_files)} documents)"
+        return f"WordMerger(master={Path(self.master_docx_path).name}, paragraphs={self.get_paragraph_count()})"

@@ -1,40 +1,60 @@
 """
-PDF document merging functionality.
+Incremental PDF document merging functionality.
+Appends PDF files to a master document and refreshes TOC.
 """
 
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 from PyPDF2 import PdfReader, PdfWriter
 from .toc_manager import TOCManager, TOCStyle
 from .bookmark_manager import BookmarkManager
-from .utils import validate_file_path, is_pdf, create_output_directory
+from .utils import validate_file_path, is_pdf, extract_headings_from_pdf
 from .config import Config
 
 
 class PDFMerger:
-    """Merge multiple PDF files into a single document with TOC and bookmarks."""
+    """Incrementally append PDF files to a master document and refresh TOC."""
     
-    def __init__(self, config: Optional[Config] = None):
-        """Initialize PDF merger.
+    def __init__(self, master_pdf_path: str, config: Optional[Config] = None):
+        """Initialize PDF merger with a master document.
         
         Args:
+            master_pdf_path: Path to master PDF file to append to
             config: Configuration object (optional)
         """
+        validate_file_path(master_pdf_path, '.pdf')
+        
         self.config = config or Config()
-        self.pdf_files: List[str] = []
-        self.pdf_reader: List[PdfReader] = []
-        self.pdf_writer = PdfWriter()
+        self.master_pdf_path = master_pdf_path
+        self.pdf_writer = None
         self.toc_manager = TOCManager()
         self.bookmark_manager = BookmarkManager()
-        self.current_page = 0
-        self.page_count = 0
+        self.original_page_count = 0
+        self._load_master_pdf()
 
-    def add_pdf(self, file_path: str, bookmark: Optional[str] = None) -> 'PDFMerger':
-        """Add a PDF file to merge queue.
+    def _load_master_pdf(self) -> None:
+        """Load master PDF into writer."""
+        with open(self.master_pdf_path, 'rb') as f:
+            reader = PdfReader(f)
+            self.pdf_writer = PdfWriter()
+            
+            # Copy all pages from master
+            for page in reader.pages:
+                self.pdf_writer.add_page(page)
+            
+            # Store original page count
+            self.original_page_count = len(reader.pages)
+            
+            # Extract existing outlines
+            if reader.outline:
+                self._extract_outlines(reader.outline, 0)
+
+    def append_pdf(self, file_path: str, bookmark: Optional[str] = None) -> 'PDFMerger':
+        """Append a PDF file to master document.
         
         Args:
-            file_path: Path to PDF file
+            file_path: Path to PDF file to append
             bookmark: Optional bookmark title for this PDF
             
         Returns:
@@ -42,126 +62,58 @@ class PDFMerger:
         """
         validate_file_path(file_path, '.pdf')
         
-        # Open and read PDF
+        current_page = len(self.pdf_writer.pages)
+        
+        # Open and read PDF to append
         with open(file_path, 'rb') as f:
             reader = PdfReader(f)
             
             # Add all pages from this PDF
-            for page_num, page in enumerate(reader.pages):
+            for page in reader.pages:
                 self.pdf_writer.add_page(page)
             
             # Add bookmark if provided
             if bookmark:
                 self.bookmark_manager.add_bookmark(
                     bookmark, 
-                    self.current_page,
+                    current_page,
                     level=0
                 )
             
-            self.pdf_files.append(file_path)
-            self.current_page += len(reader.pages)
-            self.page_count += len(reader.pages)
+            # Extract and store headings for TOC refresh
+            headings = extract_headings_from_pdf(file_path)
+            for heading, level in headings:
+                self.toc_manager.add_entry(heading, current_page, level)
         
         return self
 
-    def add_pdfs_batch(self, file_paths: List[str], bookmarks: Optional[List[str]] = None) -> 'PDFMerger':
-        """Add multiple PDF files at once.
+    def refresh_toc(self, max_depth: int = 3) -> str:
+        """Refresh table of contents with current page numbers.
+        
+        This reads the master PDF, extracts headings, and updates page numbers.
         
         Args:
-            file_paths: List of PDF file paths
-            bookmarks: Optional list of bookmark titles (must match file count)
-            
-        Returns:
-            Self for method chaining
-        """
-        for i, file_path in enumerate(file_paths):
-            bookmark = bookmarks[i] if bookmarks and i < len(bookmarks) else None
-            self.add_pdf(file_path, bookmark)
-        
-        return self
-
-    def generate_toc(self, style: str = 'formal', max_depth: int = 3, 
-                    add_to_pdf: bool = False) -> str:
-        """Generate table of contents from PDF outlines.
-        
-        Args:
-            style: TOC style ('formal', 'simple', 'hierarchical')
             max_depth: Maximum heading depth to include
-            add_to_pdf: Whether to add TOC as first page (requires reportlab)
             
         Returns:
             Formatted TOC string
         """
-        self.toc_manager.set_style(TOCStyle[style.upper()])
+        # Clear and rebuild TOC from scratch
+        self.toc_manager.clear()
         
-        # Extract outlines from PDFs
-        self._extract_outlines()
+        # Extract headings from master PDF
+        headings = extract_headings_from_pdf(self.master_pdf_path)
+        for heading, level in headings:
+            self.toc_manager.add_entry(heading, 0, level)
         
         # Filter by max depth if needed
         if max_depth < self.toc_manager.get_max_level():
             self.toc_manager = self.toc_manager.filter_by_level(max_depth)
         
-        toc_str = self.toc_manager.format_toc()
-        
-        if add_to_pdf:
-            try:
-                self._add_toc_page(toc_str)
-            except ImportError:
-                print("Warning: reportlab required to add TOC page. Install with: pip install reportlab")
-        
-        return toc_str
-
-    def _extract_outlines(self) -> None:
-        """Extract outlines/bookmarks from the merged PDF."""
-        for pdf_file in self.pdf_files:
-            try:
-                with open(pdf_file, 'rb') as f:
-                    reader = PdfReader(f)
-                    if reader.outline:
-                        self._process_outline(reader.outline, 0)
-            except Exception as e:
-                print(f"Warning: Could not extract outline from {pdf_file}: {e}")
-
-    def _process_outline(self, outline, level: int = 0, page_offset: int = 0) -> None:
-        """Process PDF outline recursively.
-        
-        Args:
-            outline: PDF outline/bookmark
-            level: Current hierarchy level
-            page_offset: Page offset for this PDF
-        """
-        for item in outline:
-            if isinstance(item, list):
-                self._process_outline(item, level + 1, page_offset)
-            else:
-                try:
-                    title = item.title if hasattr(item, 'title') else str(item)
-                    # Try to get page number
-                    page_num = self._get_page_number(item, page_offset)
-                    self.toc_manager.add_entry(title, page_num, level + 1)
-                except Exception as e:
-                    print(f"Warning: Could not process outline item: {e}")
-
-    @staticmethod
-    def _get_page_number(item, offset: int = 0) -> int:
-        """Extract page number from outline item.
-        
-        Args:
-            item: Outline item
-            offset: Page offset
-            
-        Returns:
-            Page number
-        """
-        try:
-            if hasattr(item, 'page'):
-                return item.page + offset
-            return offset
-        except:
-            return offset
+        return self.toc_manager.format_toc()
 
     def add_bookmark(self, title: str, page_num: int, level: int = 0) -> 'PDFMerger':
-        """Add a bookmark manually.
+        """Add a bookmark to the document.
         
         Args:
             title: Bookmark title
@@ -174,128 +126,54 @@ class PDFMerger:
         self.bookmark_manager.add_bookmark(title, page_num, level)
         return self
 
-    def add_bookmarks_batch(self, bookmarks: List[Tuple[str, int, int]]) -> 'PDFMerger':
-        """Add multiple bookmarks.
-        
-        Args:
-            bookmarks: List of (title, page_num, level) tuples
-            
-        Returns:
-            Self for method chaining
-        """
-        self.bookmark_manager.add_bookmarks_batch(bookmarks)
-        return self
-
-    def refresh_toc(self) -> None:
-        """Refresh TOC with updated page numbers."""
-        self._extract_outlines()
-
-    def _add_toc_page(self, toc_content: str) -> None:
-        """Add TOC as first page (requires reportlab).
-        
-        Args:
-            toc_content: Formatted TOC content
-        """
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-        from reportlab.lib.units import inch
-        from io import BytesIO
-        
-        # Create TOC PDF
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4)
-        story = []
-        
-        # Add title
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            fontSize=16,
-            textColor='black',
-            spaceAfter=30,
-            alignment=1  # Center
-        )
-        story.append(Paragraph("Table of Contents", title_style))
-        story.append(Spacer(1, 0.3*inch))
-        
-        # Add TOC content
-        normal_style = ParagraphStyle(
-            'CustomNormal',
-            fontSize=10,
-            textColor='black',
-            spaceAfter=6,
-        )
-        
-        for line in toc_content.split('\n'):
-            if line.strip():
-                story.append(Paragraph(line, normal_style))
-        
-        doc.build(story)
-        
-        # Read TOC PDF and insert at beginning
-        buffer.seek(0)
-        toc_reader = PdfReader(buffer)
-        
-        # Create new writer with TOC first
-        new_writer = PdfWriter()
-        
-        # Add TOC pages
-        for page in toc_reader.pages:
-            new_writer.add_page(page)
-        
-        # Add original pages with offset bookmarks
-        for i, page in enumerate(self.pdf_writer.pages):
-            new_writer.add_page(page)
-        
-        # Update writer
-        self.pdf_writer = new_writer
-        self.current_page = len(toc_reader.pages)
-
     def get_page_count(self) -> int:
-        """Get total page count.
+        """Get total page count of master PDF.
         
         Returns:
             Total number of pages
         """
-        return self.page_count
+        return len(self.pdf_writer.pages) if self.pdf_writer else 0
 
-    def get_pdf_count(self) -> int:
-        """Get number of PDFs added.
+    def get_appended_page_count(self) -> int:
+        """Get number of pages appended (not including original).
         
         Returns:
-            Number of PDF files
+            Number of appended pages
         """
-        return len(self.pdf_files)
+        return self.get_page_count() - self.original_page_count
 
-    def save(self, output_path: str) -> None:
-        """Save merged PDF to file.
-        
-        Args:
-            output_path: Path to output PDF file
-        """
-        create_output_directory(output_path)
+    def save(self) -> None:
+        """Save updated master PDF (overwrites original file)."""
+        if not self.pdf_writer:
+            raise ValueError("No PDF writer initialized")
         
         # Apply bookmarks
         self.bookmark_manager.apply_to_pdf(self.pdf_writer)
         
-        # Write to file
-        with open(output_path, 'wb') as f:
+        # Create backup of original
+        backup_path = str(self.master_pdf_path).rsplit('.', 1)[0] + '_backup.pdf'
+        if Path(self.master_pdf_path).exists() and not Path(backup_path).exists():
+            import shutil
+            shutil.copy(self.master_pdf_path, backup_path)
+        
+        # Write to master file (overwrites)
+        with open(self.master_pdf_path, 'wb') as f:
             self.pdf_writer.write(f)
         
-        print(f"✓ Merged PDF saved to: {output_path}")
-        print(f"  Total pages: {len(self.pdf_writer.pages)}")
-        print(f"  Total PDFs: {len(self.pdf_files)}")
+        print(f"✓ Master PDF updated: {self.master_pdf_path}")
+        print(f"  Total pages: {self.get_page_count()}")
+        print(f"  Pages appended: {self.get_appended_page_count()}")
+        if Path(backup_path).exists():
+            print(f"  Backup saved: {backup_path}")
 
-    def clear(self) -> None:
-        """Clear all data and reset merger."""
-        self.pdf_files.clear()
-        self.pdf_reader.clear()
-        self.pdf_writer = PdfWriter()
-        self.toc_manager.clear()
-        self.bookmark_manager.clear()
-        self.current_page = 0
-        self.page_count = 0
+    def get_toc_manager(self) -> TOCManager:
+        """Get TOC manager for direct access.
+        
+        Returns:
+            TOCManager instance
+        """
+        return self.toc_manager
 
     def __repr__(self) -> str:
         """String representation."""
-        return f"PDFMerger({len(self.pdf_files)} files, {self.page_count} pages)"
+        return f"PDFMerger(master={Path(self.master_pdf_path).name}, pages={self.get_page_count()})"
