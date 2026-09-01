@@ -1,20 +1,20 @@
 """
-Unit tests for Word document merger functionality.
+Test suite for incremental Word merger.
 """
 
 import unittest
 from pathlib import Path
 import sys
+import shutil
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from document_merger import WordMerger
-from document_merger.config import Config
-from docx import Document
+from tests.generate_test_files import create_sample_docx_files
 
 
 class TestWordMerger(unittest.TestCase):
-    """Test cases for WordMerger class."""
+    """Test cases for incremental Word merger."""
     
     @classmethod
     def setUpClass(cls):
@@ -22,117 +22,139 @@ class TestWordMerger(unittest.TestCase):
         cls.test_dir = Path('tests/sample_docs')
         cls.output_dir = Path('tests/output')
         cls.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate test files
+        if not cls.test_dir.exists():
+            print("Generating test DOCX files...")
+            create_sample_docx_files()
     
     def setUp(self):
-        """Set up test case."""
-        self.merger = WordMerger()
+        """Set up each test."""
+        # Create a copy of document1 as master for testing
+        self.master_docx = self.output_dir / 'test_master.docx'
+        source_docx = self.test_dir / 'document1.docx'
+        
+        if source_docx.exists():
+            shutil.copy(source_docx, self.master_docx)
     
     def tearDown(self):
-        """Tear down test case."""
-        self.merger.clear()
+        """Clean up after each test."""
+        # Clean up test files
+        if self.master_docx.exists():
+            self.master_docx.unlink()
+        backup = self.output_dir / 'test_master_backup.docx'
+        if backup.exists():
+            backup.unlink()
     
     def test_initialization(self):
-        """Test WordMerger initialization."""
-        merger = WordMerger()
-        self.assertIsNone(merger.master_doc)
-        self.assertEqual(len(merger.doc_files), 0)
-        self.assertIsNotNone(merger.toc_manager)
-    
-    def test_add_document(self):
-        """Test adding a Word document."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            self.assertEqual(len(self.merger.doc_files), 1)
-    
-    def test_add_multiple_documents(self):
-        """Test adding multiple Word documents."""
-        docs = [
-            self.test_dir / 'document1.docx',
-            self.test_dir / 'document2.docx',
-            self.test_dir / 'document3.docx',
-        ]
+        """Test WordMerger initialization with master DOCX."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
         
-        for doc_path in docs:
-            if doc_path.exists():
-                self.merger.add_document(str(doc_path))
-        
-        self.assertGreater(len(self.merger.doc_files), 0)
+        merger = WordMerger(str(self.master_docx))
+        self.assertIsNotNone(merger)
+        self.assertGreater(merger.get_paragraph_count(), 0)
+        print(f"✓ WordMerger initialized with {merger.get_paragraph_count()} paragraphs")
     
-    def test_merge(self):
-        """Test merging documents."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            result = self.merger.merge()
-            self.assertIsInstance(result, Document)
-            self.assertIsNotNone(self.merger.master_doc)
+    def test_append_document(self):
+        """Test appending a DOCX to master."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        merger = WordMerger(str(self.master_docx))
+        initial_count = merger.get_paragraph_count()
+        
+        doc2 = self.test_dir / 'document2.docx'
+        if doc2.exists():
+            merger.append_document(str(doc2), add_page_break=True)
+            new_count = merger.get_paragraph_count()
+            self.assertGreater(new_count, initial_count)
+            print(f"✓ DOCX appended: {initial_count} -> {new_count} paragraphs")
+    
+    def test_append_multiple_documents(self):
+        """Test appending multiple DOCXs sequentially."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        merger = WordMerger(str(self.master_docx))
+        initial_count = merger.get_paragraph_count()
+        
+        doc2 = self.test_dir / 'document2.docx'
+        doc3 = self.test_dir / 'document3.docx'
+        
+        if doc2.exists():
+            merger.append_document(str(doc2))
+        if doc3.exists():
+            merger.append_document(str(doc3))
+        
+        final_count = merger.get_paragraph_count()
+        appended_count = merger.get_appended_paragraph_count()
+        
+        self.assertGreater(final_count, initial_count)
+        self.assertGreater(appended_count, 0)
+        print(f"✓ Multiple DOCXs appended: {appended_count} paragraphs added")
+    
+    def test_refresh_toc(self):
+        """Test refreshing TOC."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        merger = WordMerger(str(self.master_docx))
+        toc = merger.refresh_toc(max_depth=2)
+        self.assertIsInstance(toc, str)
+        print(f"✓ TOC refreshed: {len(toc.split(chr(10)))} entries")
+    
+    def test_save(self):
+        """Test saving master DOCX."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        merger = WordMerger(str(self.master_docx))
+        doc2 = self.test_dir / 'document2.docx'
+        
+        if doc2.exists():
+            merger.append_document(str(doc2))
+        
+        original_size = self.master_docx.stat().st_size
+        merger.save()
+        new_size = self.master_docx.stat().st_size
+        
+        # File should be larger after appending
+        self.assertGreater(new_size, original_size)
+        print(f"✓ DOCX saved: {original_size} -> {new_size} bytes")
+    
+    def test_backup_creation(self):
+        """Test that backup is created when saving."""
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        merger = WordMerger(str(self.master_docx))
+        doc2 = self.test_dir / 'document2.docx'
+        
+        if doc2.exists():
+            merger.append_document(str(doc2))
+            merger.save()
+            
+            backup = self.output_dir / 'test_master_backup.docx'
+            self.assertTrue(backup.exists())
+            print(f"✓ Backup created: {backup}")
     
     def test_method_chaining(self):
         """Test method chaining."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            result = self.merger.add_document(str(doc_path)).add_documents_batch([])
+        if not self.master_docx.exists():
+            self.skipTest("Master DOCX not found")
+        
+        doc2 = self.test_dir / 'document2.docx'
+        doc3 = self.test_dir / 'document3.docx'
+        
+        merger = WordMerger(str(self.master_docx))
+        
+        if doc2.exists() and doc3.exists():
+            result = merger.append_document(str(doc2)).append_document(str(doc3))
             self.assertIsInstance(result, WordMerger)
-    
-    def test_get_document(self):
-        """Test getting master document."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            doc = self.merger.get_document()
-            self.assertIsInstance(doc, Document)
-    
-    def test_save(self):
-        """Test saving merged document."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            output_path = self.output_dir / 'test_merged.docx'
-            self.merger.save(str(output_path))
-            self.assertTrue(output_path.exists())
-    
-    def test_clear(self):
-        """Test clearing merger state."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            self.assertGreater(len(self.merger.doc_files), 0)
-            self.merger.clear()
-            self.assertEqual(len(self.merger.doc_files), 0)
-            self.assertIsNone(self.merger.master_doc)
-    
-    def test_config_initialization(self):
-        """Test merger with custom config."""
-        config = Config()
-        merger = WordMerger(config)
-        self.assertIsNotNone(merger.config)
-
-
-class TestWordTOC(unittest.TestCase):
-    """Test cases for Word TOC generation and refresh."""
-    
-    def setUp(self):
-        """Set up test case."""
-        self.merger = WordMerger()
-        self.test_dir = Path('tests/sample_docs')
-    
-    def test_toc_generation(self):
-        """Test TOC generation."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            toc = self.merger.generate_toc()
-            self.assertIsInstance(toc, str)
-    
-    def test_refresh_toc(self):
-        """Test TOC refresh."""
-        doc_path = self.test_dir / 'document1.docx'
-        if doc_path.exists():
-            self.merger.add_document(str(doc_path))
-            toc = self.merger.refresh_toc()
-            self.assertIsInstance(toc, str)
+            print(f"✓ Method chaining works")
 
 
 if __name__ == '__main__':
-    unittest.main()
+    # Run tests with verbose output
+    unittest.main(verbosity=2)

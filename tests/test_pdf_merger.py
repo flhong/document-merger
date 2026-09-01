@@ -1,19 +1,20 @@
 """
-Unit tests for PDF merger functionality.
+Test suite for incremental PDF merger.
 """
 
 import unittest
 from pathlib import Path
 import sys
+import shutil
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from document_merger import PDFMerger
-from document_merger.config import Config
+from tests.generate_test_files import create_sample_pdf_files
 
 
 class TestPDFMerger(unittest.TestCase):
-    """Test cases for PDFMerger class."""
+    """Test cases for incremental PDF merger."""
     
     @classmethod
     def setUpClass(cls):
@@ -21,110 +22,139 @@ class TestPDFMerger(unittest.TestCase):
         cls.test_dir = Path('tests/sample_pdfs')
         cls.output_dir = Path('tests/output')
         cls.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate test files
+        if not cls.test_dir.exists():
+            print("Generating test PDF files...")
+            create_sample_pdf_files()
     
     def setUp(self):
-        """Set up test case."""
-        self.merger = PDFMerger()
+        """Set up each test."""
+        # Create a copy of document1 as master for testing
+        self.master_pdf = self.output_dir / 'test_master.pdf'
+        source_pdf = self.test_dir / 'document1.pdf'
+        
+        if source_pdf.exists():
+            shutil.copy(source_pdf, self.master_pdf)
     
     def tearDown(self):
-        """Tear down test case."""
-        self.merger.clear()
+        """Clean up after each test."""
+        # Clean up test files
+        if self.master_pdf.exists():
+            self.master_pdf.unlink()
+        backup = self.output_dir / 'test_master_backup.pdf'
+        if backup.exists():
+            backup.unlink()
     
     def test_initialization(self):
-        """Test PDFMerger initialization."""
-        merger = PDFMerger()
-        self.assertEqual(merger.page_count, 0)
-        self.assertEqual(merger.get_pdf_count(), 0)
-        self.assertIsNotNone(merger.toc_manager)
-        self.assertIsNotNone(merger.bookmark_manager)
-    
-    def test_add_pdf(self):
-        """Test adding a PDF file."""
-        pdf_path = self.test_dir / 'document1.pdf'
-        if pdf_path.exists():
-            self.merger.add_pdf(str(pdf_path))
-            self.assertEqual(self.merger.get_pdf_count(), 1)
-            self.assertGreater(self.merger.page_count, 0)
-    
-    def test_add_multiple_pdfs(self):
-        """Test adding multiple PDF files."""
-        pdfs = [
-            self.test_dir / 'document1.pdf',
-            self.test_dir / 'document2.pdf',
-            self.test_dir / 'document3.pdf',
-        ]
+        """Test PDFMerger initialization with master PDF."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
         
-        for pdf_path in pdfs:
-            if pdf_path.exists():
-                self.merger.add_pdf(str(pdf_path))
-        
-        self.assertGreaterEqual(self.merger.get_pdf_count(), 1)
+        merger = PDFMerger(str(self.master_pdf))
+        self.assertIsNotNone(merger)
+        self.assertGreater(merger.get_page_count(), 0)
+        print(f"✓ PDFMerger initialized with {merger.get_page_count()} pages")
     
-    def test_add_pdf_with_bookmark(self):
-        """Test adding PDF with bookmark."""
-        pdf_path = self.test_dir / 'document1.pdf'
-        if pdf_path.exists():
-            self.merger.add_pdf(str(pdf_path), bookmark='Test Chapter')
-            self.assertEqual(self.merger.get_pdf_count(), 1)
+    def test_append_pdf(self):
+        """Test appending a PDF to master."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
+        
+        merger = PDFMerger(str(self.master_pdf))
+        initial_count = merger.get_page_count()
+        
+        doc2 = self.test_dir / 'document2.pdf'
+        if doc2.exists():
+            merger.append_pdf(str(doc2))
+            new_count = merger.get_page_count()
+            self.assertGreater(new_count, initial_count)
+            print(f"✓ PDF appended: {initial_count} -> {new_count} pages")
+    
+    def test_append_multiple_pdfs(self):
+        """Test appending multiple PDFs sequentially."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
+        
+        merger = PDFMerger(str(self.master_pdf))
+        initial_count = merger.get_page_count()
+        
+        doc2 = self.test_dir / 'document2.pdf'
+        doc3 = self.test_dir / 'document3.pdf'
+        
+        if doc2.exists():
+            merger.append_pdf(str(doc2))
+        if doc3.exists():
+            merger.append_pdf(str(doc3))
+        
+        final_count = merger.get_page_count()
+        appended_count = merger.get_appended_page_count()
+        
+        self.assertGreater(final_count, initial_count)
+        self.assertGreater(appended_count, 0)
+        print(f"✓ Multiple PDFs appended: {appended_count} pages added")
+    
+    def test_refresh_toc(self):
+        """Test refreshing TOC."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
+        
+        merger = PDFMerger(str(self.master_pdf))
+        toc = merger.refresh_toc(max_depth=2)
+        self.assertIsInstance(toc, str)
+        print(f"✓ TOC refreshed: {len(toc.split(chr(10)))} entries")
+    
+    def test_save(self):
+        """Test saving master PDF."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
+        
+        merger = PDFMerger(str(self.master_pdf))
+        doc2 = self.test_dir / 'document2.pdf'
+        
+        if doc2.exists():
+            merger.append_pdf(str(doc2))
+        
+        original_size = self.master_pdf.stat().st_size
+        merger.save()
+        new_size = self.master_pdf.stat().st_size
+        
+        # File should be larger after appending
+        self.assertGreater(new_size, original_size)
+        print(f"✓ PDF saved: {original_size} -> {new_size} bytes")
+    
+    def test_backup_creation(self):
+        """Test that backup is created when saving."""
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
+        
+        merger = PDFMerger(str(self.master_pdf))
+        doc2 = self.test_dir / 'document2.pdf'
+        
+        if doc2.exists():
+            merger.append_pdf(str(doc2))
+            merger.save()
+            
+            backup = self.output_dir / 'test_master_backup.pdf'
+            self.assertTrue(backup.exists())
+            print(f"✓ Backup created: {backup}")
     
     def test_method_chaining(self):
         """Test method chaining."""
-        pdf_path = self.test_dir / 'document1.pdf'
-        if pdf_path.exists():
-            result = self.merger.add_pdf(str(pdf_path)).add_bookmark('Chapter 1', 0)
-            self.assertIsInstance(result, PDFMerger)
-    
-    def test_clear(self):
-        """Test clearing merger state."""
-        pdf_path = self.test_dir / 'document1.pdf'
-        if pdf_path.exists():
-            self.merger.add_pdf(str(pdf_path))
-            self.assertGreater(self.merger.get_pdf_count(), 0)
-            self.merger.clear()
-            self.assertEqual(self.merger.get_pdf_count(), 0)
-            self.assertEqual(self.merger.page_count, 0)
-    
-    def test_save(self):
-        """Test saving merged PDF."""
-        pdf_path = self.test_dir / 'document1.pdf'
-        if pdf_path.exists():
-            self.merger.add_pdf(str(pdf_path))
-            output_path = self.output_dir / 'test_output.pdf'
-            self.merger.save(str(output_path))
-            self.assertTrue(output_path.exists())
-            self.assertGreater(output_path.stat().st_size, 0)
-    
-    def test_config_initialization(self):
-        """Test merger with custom config."""
-        config = Config()
-        merger = PDFMerger(config)
-        self.assertIsNotNone(merger.config)
-
-
-class TestPDFTOC(unittest.TestCase):
-    """Test cases for PDF TOC generation."""
-    
-    def setUp(self):
-        """Set up test case."""
-        self.merger = PDFMerger()
-    
-    def test_toc_generation(self):
-        """Test TOC generation."""
-        test_dir = Path('tests/sample_pdfs')
-        pdf_path = test_dir / 'document1.pdf'
+        if not self.master_pdf.exists():
+            self.skipTest("Master PDF not found")
         
-        if pdf_path.exists():
-            self.merger.add_pdf(str(pdf_path))
-            toc = self.merger.generate_toc()
-            self.assertIsInstance(toc, str)
-    
-    def test_add_bookmark(self):
-        """Test adding bookmarks."""
-        self.merger.add_bookmark('Chapter 1', 0)
-        bookmarks = self.merger.bookmark_manager.get_bookmarks()
-        self.assertEqual(len(bookmarks), 1)
-        self.assertEqual(bookmarks[0].title, 'Chapter 1')
+        doc2 = self.test_dir / 'document2.pdf'
+        doc3 = self.test_dir / 'document3.pdf'
+        
+        merger = PDFMerger(str(self.master_pdf))
+        
+        if doc2.exists() and doc3.exists():
+            result = merger.append_pdf(str(doc2)).append_pdf(str(doc3))
+            self.assertIsInstance(result, PDFMerger)
+            print(f"✓ Method chaining works")
 
 
 if __name__ == '__main__':
-    unittest.main()
+    # Run tests with verbose output
+    unittest.main(verbosity=2)
