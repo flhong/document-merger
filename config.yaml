@@ -1,0 +1,47 @@
+# Configuration for Document Merger
+
+merge:
+  # Output format: 'pdf' or 'docx'
+  output_format: pdf
+  
+  # Whether to preserve original formatting
+  preserve_formatting: true
+  
+  # Enable page numbering in output
+  page_numbering: true
+
+toc:
+  # Auto-generate TOC from document structure
+  auto_generate: true
+  
+  # Auto-refresh TOC with updated page numbers
+  auto_refresh: true
+  
+  # Maximum heading depth to include (1-6)
+  max_depth: 3
+  
+  # Include page numbers in TOC
+  include_page_numbers: true
+  
+  # TOC style: 'formal' (with dots), 'simple' (list), 'hierarchical'
+  style: formal
+
+pdf:
+  # Add bookmarks/outlines to PDF
+  add_bookmarks: true
+  
+  # Bookmark style: 'hierarchical' or 'flat'
+  bookmark_style: hierarchical
+  
+  # Enable page numbering
+  page_numbering: true
+
+word:
+  # Keep original styles from source documents
+  keep_styles: true
+  
+  # Merge similar styles
+  merge_styles: true
+  
+  # Update TOC fields when opening in Word
+  update_fields: true
